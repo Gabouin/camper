@@ -12,9 +12,12 @@ async function initDb() {
       description TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       opened_by_slack_id TEXT,
+      claimed_by_slack_id TEXT,
       closed_by_slack_id TEXT,
       closed_at TIMESTAMPTZ,
       last_msg_at TIMESTAMPTZ,
+      ticket_number INTEGER,
+      permalink TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -22,8 +25,15 @@ async function initDb() {
       slack_user_id TEXT PRIMARY KEY,
       added_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    CREATE SEQUENCE IF NOT EXISTS ticket_seq START 1;
   `);
+
   await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS channel_id TEXT`);
+  await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_by_slack_id TEXT`);
+  await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ticket_number INTEGER`);
+  await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS permalink TEXT`);
+
   console.log('[db] Tables ready');
 }
 
