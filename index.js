@@ -42,7 +42,8 @@ async function checkIsInTicketChannel(userId, client) {
 // ─── Ticket helpers ───────────────────────────────────────────────────────────
 
 function ticketBlocks(ticket) {
-  const { description, opened_by_slack_id, status, claimed_by_slack_id, ticket_number, permalink } = ticket;
+  const { description, title, opened_by_slack_id, status, claimed_by_slack_id, ticket_number, permalink } = ticket;
+  const displayTitle = title || (description.length > 80 ? description.substring(0, 80) + '...' : description);
 
   let statusText;
   if (status === 'closed') {
@@ -91,10 +92,9 @@ function ticketBlocks(ticket) {
     });
   }
 
-  const preview = description.length > 80 ? description.substring(0, 80) + '...' : description;
   blocks.push({
     type: 'section',
-    text: { type: 'mrkdwn', text: `*${preview}*\n<@${opened_by_slack_id}>` },
+    text: { type: 'mrkdwn', text: `*${displayTitle}*\n<@${opened_by_slack_id}>` },
   });
 
   blocks.push({
@@ -206,6 +206,61 @@ async function reopenTicket(msgTs, reopenedById, client) {
 
 // ─── Ticket creation ──────────────────────────────────────────────────────────
 
+const pendingTickets = new Map(); // msg_ts → { event, timeoutId }
+
+async function createTicket(event, title, client) {
+  const description = event.text || '(no text)';
+
+  const [permalinkRes, ticketNumRes] = await Promise.all([
+    client.chat.getPermalink({ channel: event.channel, message_ts: event.ts }).catch(() => null),
+    pool.query(`SELECT COALESCE(MAX(ticket_number), 0) + 1 AS next FROM tickets`),
+  ]);
+
+  const permalink = permalinkRes?.permalink || null;
+  const ticketNumber = ticketNumRes.rows[0].next;
+
+  const newTicket = {
+    msg_ts: event.ts,
+    description,
+    title: title || null,
+    opened_by_slack_id: event.user,
+    status: 'open',
+    claimed_by_slack_id: null,
+    ticket_number: ticketNumber,
+    permalink,
+  };
+
+  const ticketMsg = await client.chat.postMessage({
+    channel: TICKET_CHANNEL,
+    blocks: ticketBlocks(newTicket),
+    text: `New ticket from <@${event.user}>`,
+  });
+
+  await client.chat.postMessage({
+    channel: event.channel,
+    thread_ts: event.ts,
+    blocks: [{
+      type: 'actions',
+      block_id: 'thread_actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '✅ Mark as resolved', emoji: true },
+        style: 'primary',
+        action_id: 'mark_resolved',
+        value: event.ts,
+      }],
+    }],
+    text: 'Mark as resolved',
+  });
+
+  await pool.query(
+    `INSERT INTO tickets (msg_ts, ticket_msg_ts, channel_id, title, description, status, opened_by_slack_id, last_msg_at, ticket_number, permalink)
+     VALUES ($1, $2, $3, $4, $5, 'open', $6, NOW(), $7, $8)
+     ON CONFLICT (msg_ts) DO NOTHING`,
+    [event.ts, ticketMsg.ts, event.channel, title || null, description, event.user, ticketNumber, permalink]
+  );
+}
+
 app.event('message', async ({ event, client }) => {
 
   if (!HELP_CHANNELS.includes(event.channel)) return;
@@ -250,32 +305,8 @@ app.event('message', async ({ event, client }) => {
     return;
   }
 
-  // New message in the channel → create a ticket
-  const description = event.text || '(no text)';
-
-  const [permalinkRes, ticketNumRes] = await Promise.all([
-    client.chat.getPermalink({ channel: event.channel, message_ts: event.ts }).catch(() => null),
-    pool.query(`SELECT COALESCE(MAX(ticket_number), 0) + 1 AS next FROM tickets`),
-  ]);
-
-  const permalink = permalinkRes?.permalink || null;
-  const ticketNumber = ticketNumRes.rows[0].next;
-
-  const newTicket = {
-    msg_ts: event.ts,
-    description,
-    opened_by_slack_id: event.user,
-    status: 'open',
-    claimed_by_slack_id: null,
-    ticket_number: ticketNumber,
-    permalink,
-  };
-
-  const ticketMsg = await client.chat.postMessage({
-    channel: TICKET_CHANNEL,
-    blocks: ticketBlocks(newTicket),
-    text: `New ticket from <@${event.user}>`,
-  });
+  // New message in the channel → ask for title, create ticket after
+  await client.reactions.add({ channel: event.channel, timestamp: event.ts, name: 'thinking_face' });
 
   await client.chat.postMessage({
     channel: event.channel,
@@ -283,39 +314,37 @@ app.event('message', async ({ event, client }) => {
     text: "Someone will be here to help you soon!",
   });
 
-  await client.reactions.add({
+  await client.chat.postEphemeral({
     channel: event.channel,
-    timestamp: event.ts,
-    name: 'thinking_face',
-  });
-
-  await client.chat.postMessage({
-    channel: event.channel,
-    thread_ts: event.ts,
+    user: event.user,
+    text: '📝 Please set a title for your question.',
     blocks: [
       {
+        type: 'section',
+        text: { type: 'mrkdwn', text: '📝 Please give your question a short title so helpers can understand it at a glance.' },
+      },
+      {
         type: 'actions',
-        block_id: 'thread_actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '✅ Mark as resolved', emoji: true },
-            style: 'primary',
-            action_id: 'mark_resolved',
-            value: event.ts,
-          },
-        ],
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: 'Set title', emoji: true },
+          style: 'primary',
+          action_id: 'open_title_modal',
+          value: JSON.stringify({ msg_ts: event.ts, channel: event.channel }),
+        }],
       },
     ],
-    text: 'Mark as resolved',
   });
 
-  await pool.query(
-    `INSERT INTO tickets (msg_ts, ticket_msg_ts, channel_id, description, status, opened_by_slack_id, last_msg_at, ticket_number, permalink)
-     VALUES ($1, $2, $3, $4, 'open', $5, NOW(), $6, $7)
-     ON CONFLICT (msg_ts) DO NOTHING`,
-    [event.ts, ticketMsg.ts, event.channel, description, event.user, ticketNumber, permalink]
-  );
+  // Auto-create ticket after 3 min if no title set
+  const timeoutId = setTimeout(async () => {
+    if (pendingTickets.has(event.ts)) {
+      pendingTickets.delete(event.ts);
+      await createTicket(event, null, client).catch(console.error);
+    }
+  }, 3 * 60 * 1000);
+
+  pendingTickets.set(event.ts, { event, timeoutId });
   } catch (err) {
     console.error('[error] message handler failed:', err?.data || err?.message || err);
   }
@@ -456,6 +485,47 @@ app.action('reopen_ticket_from_thread', async ({ ack, body, client }) => {
   }
 
   await reopenTicket(msgTs, userId, client);
+});
+
+// ─── Title modal ─────────────────────────────────────────────────────────────
+
+app.action('open_title_modal', async ({ ack, body, client }) => {
+  await ack();
+  const { msg_ts, channel } = JSON.parse(body.actions[0].value);
+  await client.views.open({
+    trigger_id: body.trigger_id,
+    view: {
+      type: 'modal',
+      callback_id: 'title_modal',
+      private_metadata: JSON.stringify({ msg_ts, channel }),
+      title: { type: 'plain_text', text: 'Set question title' },
+      submit: { type: 'plain_text', text: 'Submit' },
+      close: { type: 'plain_text', text: 'Skip' },
+      blocks: [{
+        type: 'input',
+        block_id: 'title_block',
+        element: {
+          type: 'plain_text_input',
+          action_id: 'title_input',
+          placeholder: { type: 'plain_text', text: 'e.g. "How do I reset my password?"' },
+          max_length: 100,
+        },
+        label: { type: 'plain_text', text: 'Title' },
+      }],
+    },
+  });
+});
+
+app.view('title_modal', async ({ ack, body, view, client }) => {
+  await ack();
+  const { msg_ts } = JSON.parse(view.private_metadata);
+  const title = view.state.values.title_block.title_input.value;
+  const pending = pendingTickets.get(msg_ts);
+  if (pending) {
+    clearTimeout(pending.timeoutId);
+    pendingTickets.delete(msg_ts);
+    await createTicket(pending.event, title, client).catch(console.error);
+  }
 });
 
 // ─── Slash commands ───────────────────────────────────────────────────────────

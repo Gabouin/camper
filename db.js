@@ -33,6 +33,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS claimed_by_slack_id TEXT`);
   await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS ticket_number INTEGER`);
   await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS permalink TEXT`);
+  await pool.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS title TEXT`);
 
   console.log('[db] Tables ready');
 }
