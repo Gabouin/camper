@@ -460,6 +460,14 @@ app.action('reopen_ticket_from_thread', async ({ ack, body, client }) => {
 
 // ─── Slash commands ───────────────────────────────────────────────────────────
 
+function parseUserId(text) {
+  const mention = text.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
+  if (mention) return mention[1];
+  const raw = text.trim().match(/^(U[A-Z0-9]+)$/i);
+  if (raw) return raw[1].toUpperCase();
+  return null;
+}
+
 app.command('/camper-addhelper', async ({ ack, command, respond }) => {
   await ack();
 
@@ -468,13 +476,12 @@ app.command('/camper-addhelper', async ({ ack, command, respond }) => {
     return;
   }
 
-  const match = command.text.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-  if (!match) {
+  const targetId = parseUserId(command.text);
+  if (!targetId) {
     await respond({ text: 'Usage: `/camper-addhelper @user`', response_type: 'ephemeral' });
     return;
   }
 
-  const targetId = match[1];
   await pool.query(
     'INSERT INTO helpers (slack_user_id) VALUES ($1) ON CONFLICT DO NOTHING',
     [targetId]
@@ -490,13 +497,12 @@ app.command('/camper-removehelper', async ({ ack, command, respond }) => {
     return;
   }
 
-  const match = command.text.match(/<@([A-Z0-9]+)(?:\|[^>]+)?>/);
-  if (!match) {
+  const targetId = parseUserId(command.text);
+  if (!targetId) {
     await respond({ text: 'Usage: `/camper-removehelper @user`', response_type: 'ephemeral' });
     return;
   }
 
-  const targetId = match[1];
   await pool.query('DELETE FROM helpers WHERE slack_user_id = $1', [targetId]);
   await respond({ text: `<@${targetId}> is no longer a helper.`, response_type: 'in_channel' });
 });
