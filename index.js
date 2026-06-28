@@ -317,11 +317,11 @@ app.event('message', async ({ event, client }) => {
   await client.chat.postEphemeral({
     channel: event.channel,
     user: event.user,
-    text: '📝 Please set a title for your question.',
+    text: `Hey <@${event.user}>! Please give your question a short title.`,
     blocks: [
       {
         type: 'section',
-        text: { type: 'mrkdwn', text: '📝 Please give your question a short title so helpers can understand it at a glance.' },
+        text: { type: 'mrkdwn', text: `Hey <@${event.user}>! 📝 Please give your question a short title so helpers can understand it at a glance.` },
       },
       {
         type: 'actions',
@@ -489,14 +489,17 @@ app.action('reopen_ticket_from_thread', async ({ ack, body, client }) => {
 
 // ─── Title modal ─────────────────────────────────────────────────────────────
 
-app.action('open_title_modal', async ({ ack, body, client }) => {
+app.action('open_title_modal', async ({ ack, body, client, respond }) => {
   await ack();
   const { msg_ts, channel } = JSON.parse(body.actions[0].value);
+  // Delete the ephemeral prompt immediately
+  await respond({ delete_original: true });
   await client.views.open({
     trigger_id: body.trigger_id,
     view: {
       type: 'modal',
       callback_id: 'title_modal',
+      notify_on_close: true,
       private_metadata: JSON.stringify({ msg_ts, channel }),
       title: { type: 'plain_text', text: 'Set question title' },
       submit: { type: 'plain_text', text: 'Submit' },
@@ -525,6 +528,18 @@ app.view('title_modal', async ({ ack, body, view, client }) => {
     clearTimeout(pending.timeoutId);
     pendingTickets.delete(msg_ts);
     await createTicket(pending.event, title, client).catch(console.error);
+  }
+});
+
+// If user closes the modal without submitting, create ticket immediately without title
+app.view({ callback_id: 'title_modal', type: 'view_closed' }, async ({ ack, body, view, client }) => {
+  await ack();
+  const { msg_ts } = JSON.parse(view.private_metadata);
+  const pending = pendingTickets.get(msg_ts);
+  if (pending) {
+    clearTimeout(pending.timeoutId);
+    pendingTickets.delete(msg_ts);
+    await createTicket(pending.event, null, client).catch(console.error);
   }
 });
 
